@@ -7,7 +7,7 @@ async fn main() {
     let commander = &mut Commander::new();
     commander.init();
     commander.start();
-    commander.run_loop();
+    commander.run_loop().await;
     commander.stop();
     commander.destroy();
 }

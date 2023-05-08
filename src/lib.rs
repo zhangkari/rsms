@@ -24,11 +24,11 @@ pub mod rsms {
     pub mod core {
         use std::collections::LinkedList;
         use std::hash::{Hash, Hasher};
-        use std::net::TcpListener;
-        use std::thread;
-        use std::time::Duration;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
         use tokio::net::TcpStream;
+
+        use super::admin::AdminContributor;
 
         // region: Category
         #[repr(u8)]
@@ -98,10 +98,10 @@ pub mod rsms {
         // region: Profile
         #[derive(Debug)]
         pub struct Profile {
-            name: &'static str,
-            port: u16,
-            log: bool,
-            enable: bool,
+            pub name: &'static str,
+            pub port: u16,
+            pub log: bool,
+            pub enable: bool,
         }
 
         impl Profile {
@@ -114,14 +114,14 @@ pub mod rsms {
 
             const HTTP: Profile = Profile {
                 name: "HTTP",
-                port: 80,
+                port: 8080,
                 log: true,
                 enable: true,
             };
 
             const RTSP: Profile = Profile {
                 name: "RTSP",
-                port: 554,
+                port: 5544,
                 log: true,
                 enable: true,
             };
@@ -226,8 +226,8 @@ pub mod rsms {
         }
         // region: Cotributor
         pub struct Contributor {
-            profile: Profile,
-            context: Context,
+            pub profile: Profile,
+            pub context: Context,
         }
 
         impl Contributor {
@@ -240,29 +240,31 @@ pub mod rsms {
 
             pub async fn startup(&mut self) {
                 let addr = format!("127.0.0.1:{}", self.profile.port);
-                let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-
-                // listener.set_nonblocking(true);
+                let listener = TcpListener::bind(&addr)
+                    .await
+                    .expect(format!("Bind {} failed", &addr).as_str());
 
                 if self.profile.log {
                     println!("{} Bind {}", &self.profile.name, &addr);
                 }
 
                 // self.context.listener = Some(listener);
-                // self.context.incoming = Some(&mut listener.incoming());
 
                 loop {
-                    let (socket, addr) = listener.accept().await.expect("accept error");
+                    let (mut socket, addr) = listener.accept().await.expect("accept error");
                     if self.profile.log {
                         println!("{} Request from:{}", &self.profile.name, addr.to_string());
                     }
 
-                    let session =
-                        Session::new(socket, self.profile.port, Category::from(self.profile.name));
+                    /*
+                                    let session =
+                                        Session::new(socket, self.profile.port, Category::from(self.profile.name));
+
+                    */
 
                     let _handle = tokio::spawn(async move {
                         let mut buf = [0; 1024];
-                        let mut socket = session.stream;
+                        // let mut socket = session.stream;
                         loop {
                             let n = match socket.read(&mut buf).await {
                                 Ok(0) => return,
@@ -284,8 +286,7 @@ pub mod rsms {
 
                             // self.context.sessions.push_back(session);
                         }
-                    })
-                    .await;
+                    });
                 }
             }
         }
@@ -309,42 +310,32 @@ pub mod rsms {
 
         // region: Commander
         pub struct Commander {
-            pub this: Contributor,
-            pub others: Vec<Contributor>,
+            pub this: Box<dyn Serve>,
+            pub others: Vec<Box<dyn Serve>>,
         }
 
         impl Commander {
             fn from(profile: Profile) -> Commander {
                 Commander {
-                    this: Contributor::from(profile),
+                    this: Box::new(AdminContributor::from(profile)),
                     others: vec![],
                 }
             }
 
             pub fn new() -> Commander {
-                Commander::from(Profile::API_ADMIN)
+                Self::from(Profile::API_ADMIN)
             }
 
-            pub fn run_loop(&mut self) {
-                loop {
-                    /*
-                    select! {
-                        Ok((socket, addr)) = self.this.context.listener.incoming().unwrap().next() => {
-
-                        },
-                    }
-                    */
-
-                    thread::sleep(Duration::from_secs(20));
-                }
+            pub async fn run_loop(&mut self) {
+                println!("loop start");
             }
         }
 
         impl Serve for Commander {
             fn init(&mut self) {
-                self.others.push(Contributor::from(Profile::RTMP));
-                self.others.push(Contributor::from(Profile::HTTP));
-                self.others.push(Contributor::from(Profile::RTSP));
+                self.others.push(Box::new(Contributor::from(Profile::RTMP)));
+                self.others.push(Box::new(Contributor::from(Profile::HTTP)));
+                self.others.push(Box::new(Contributor::from(Profile::RTSP)));
 
                 self.this.init();
                 for item in &mut self.others {
@@ -380,24 +371,57 @@ pub mod rsms {
         // endregion: Commander
     }
 
-    mod admin {
-        use actix_web::{get, web, App, HttpServer, Responder};
-
-        use super::core::Contributor;
+    pub mod admin {
+        use super::core::{Contributor, Profile, Serve};
+        use actix_web::{dev::Server, get, web, App, HttpServer, Responder};
 
         #[get("/hello/{name}")]
         async fn greet(name: web::Path<String>) -> impl Responder {
+            println!("greet:{}", name);
             format!("Hello {name}!")
         }
-        pub async fn init() -> std::io::Result<()> {
-            HttpServer::new(|| App::new().service(greet))
-                .bind("127.0.0.1:9999")?
-                .run()
-                .await
+
+        pub struct AdminContributor {
+            this: Contributor,
+            server: Option<Server>,
         }
 
-        struct AdminContributor {
-            this: Contributor,
+        impl AdminContributor {
+            pub fn from(profile: Profile) -> AdminContributor {
+                AdminContributor {
+                    this: Contributor::from(profile),
+                    server: None,
+                }
+            }
+
+            pub async fn startup(&mut self) {
+                let addr = format!("127.0.0.1:{}", self.this.profile.port);
+                let server = HttpServer::new(|| App::new().service(greet))
+                    .bind(addr)
+                    .unwrap()
+                    .run()
+                    .await;
+            }
+        }
+
+        impl Serve for AdminContributor {
+            fn init(&mut self) {
+                futures::executor::block_on(async {
+                    self.startup().await;
+                });
+            }
+
+            fn start(&mut self) {}
+
+            fn stop(&mut self) {}
+
+            fn destroy(&mut self) {}
+
+            fn on_read(&mut self) {}
+
+            fn on_write(&mut self) {}
+
+            fn on_error(&mut self) {}
         }
     }
 }
